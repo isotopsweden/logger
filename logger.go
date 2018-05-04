@@ -1,14 +1,19 @@
-package logger
+package httplogger
 
-import "github.com/dustin/go-humanize"
-import "github.com/segmentio/go-log"
-import "net/http"
-import "time"
+import (
+	"net/http"
+	"regexp"
+	"time"
+
+	"github.com/dustin/go-humanize"
+	"github.com/segmentio/go-log"
+)
 
 // Logger middleware.
 type Logger struct {
-	h   http.Handler
-	log *log.Logger
+	h          http.Handler
+	log        *log.Logger
+	processors map[string]string
 }
 
 // SetLogger sets the logger to `log`.
@@ -37,22 +42,38 @@ func (w *wrapper) Write(b []byte) (int, error) {
 }
 
 // New logger middleware.
-func New() func(http.Handler) http.Handler {
+func New(args ...interface{}) func(http.Handler) http.Handler {
 	return func(h http.Handler) http.Handler {
-		return &Logger{
+		l := &Logger{
 			log: log.Log,
 			h:   h,
 		}
+
+		if len(args) > 0 {
+			if p, ok := args[0].(map[string]string); ok {
+				l.processors = p
+			}
+		}
+
+		return l
 	}
 }
 
 // NewLogger logger middleware with the given logger.
-func NewLogger(log *log.Logger) func(http.Handler) http.Handler {
+func NewLogger(log *log.Logger, args ...interface{}) func(http.Handler) http.Handler {
 	return func(h http.Handler) http.Handler {
-		return &Logger{
+		l := &Logger{
 			log: log,
 			h:   h,
 		}
+
+		if len(args) > 0 {
+			if p, ok := args[0].(map[string]string); ok {
+				l.processors = p
+			}
+		}
+
+		return l
 	}
 }
 
@@ -61,16 +82,33 @@ func (l *Logger) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	start := time.Now()
 	res := &wrapper{w, 0, 200}
 
-	l.log.Info(">> %s %s", r.Method, r.RequestURI)
+	l.log.Info(">> %s %s", r.Method, l.Sanitize(r.RequestURI))
 	l.h.ServeHTTP(res, r)
 	size := humanize.Bytes(uint64(res.written))
 
 	switch {
 	case res.status >= 500:
-		l.log.Error("<< %s %s %d (%s) in %s", r.Method, r.RequestURI, res.status, size, time.Since(start))
+		l.log.Error("<< %s %s %d (%s) in %s", r.Method, l.Sanitize(r.RequestURI), res.status, size, time.Since(start))
 	case res.status >= 400:
-		l.log.Warning("<< %s %s %d (%s) in %s", r.Method, r.RequestURI, res.status, size, time.Since(start))
+		l.log.Warning("<< %s %s %d (%s) in %s", r.Method, l.Sanitize(r.RequestURI), res.status, size, time.Since(start))
 	default:
-		l.log.Info("<< %s %s %d (%s) in %s", r.Method, r.RequestURI, res.status, size, time.Since(start))
+		l.log.Info("<< %s %s %d (%s) in %s", r.Method, l.Sanitize(r.RequestURI), res.status, size, time.Since(start))
 	}
+}
+
+// Sanitize input.
+func (l *Logger) Sanitize(s string) string {
+	if l.processors == nil {
+		return s
+	}
+
+	for key, value := range l.processors {
+		r, err := regexp.Compile(key)
+		if err != nil {
+			continue
+		}
+		s = r.ReplaceAllString(s, value)
+	}
+
+	return s
 }
